@@ -198,14 +198,24 @@ def times_in_window_grid(start_hour, duration_h, step_min, target_start, target_
     return [f"{int(h)%24:02d}:{int(round((h%1)*60))%60:02d}" for h in cands]
 
 
+
 def fill_to_limit(current, t_axis, start_hour, mg_limit, fed, step_min,
                   lam_out, lam_rough, lam_peak,
                   target_start, target_end, buffer_h, min_gap_min):
-    """Greedily add doses (10/20 mg) by best absolute score until reaching mg_limit or MAX_DOSES."""
+    """Greedily add doses AND/OR upgrade 10→20 mg to reach the mg_limit,
+    while respecting MAX_DOSES and min-gap. Uses best absolute objective criteria.
+    """
     def score(curve):
         return objective(curve, t_axis, target_start, target_end, lam_out, lam_rough, lam_peak, start_hour)
-    # Build candidate grid
+
+    # Start state
+    current = [dict(d) for d in current]  # copy
+    total_curve, _ = simulate_total(t_axis, current, start_hour)
+    used_mg = sum(d['mg'] for d in current)
+
+    # Build candidate time grid
     cand_times = times_in_window_grid(start_hour, int(t_axis[-1]), step_min, target_start, target_end, buffer_h)
+
     def violates_gap(tstr, picks):
         def parse(tstr): 
             hh, mm = map(int, tstr.split(":")); return hh + mm/60.0
@@ -214,10 +224,7 @@ def fill_to_limit(current, t_axis, start_hour, mg_limit, fed, step_min,
                 return True
         return False
 
-    # Current state
-    total_curve, _ = simulate_total(t_axis, current, start_hour)
-    used_mg = sum(d['mg'] for d in current)
-
+    # Phase A: ADD new doses until we hit MAX_DOSES or no time slots fit
     while used_mg + 10 <= mg_limit and len(current) < MAX_DOSES:
         best_s = None
         best_add = None
@@ -238,7 +245,31 @@ def fill_to_limit(current, t_axis, start_hour, mg_limit, fed, step_min,
         current.append(best_add)
         used_mg += best_add["mg"]
         total_curve = best_curve
+
+    # Phase B: if we still have headroom, UPGRADE existing 10mg -> 20mg by best gain
+    # (doesn't change times, so it never violates min-gap)
+    while used_mg + 10 <= mg_limit:
+        indices_10 = [i for i,d in enumerate(current) if d["mg"] == 10]
+        if not indices_10:
+            break
+        best_s = None
+        best_idx = None
+        best_curve = None
+        for i in indices_10:
+            trial = [dict(d) for d in current]
+            trial[i]["mg"] = 20
+            trial_curve, _ = simulate_total(t_axis, trial, start_hour)
+            s = score(trial_curve)
+            if (best_s is None) or (s > best_s + 1e-12):
+                best_s, best_idx, best_curve = s, i, trial_curve
+        if best_idx is None:
+            break
+        current[best_idx]["mg"] = 20
+        used_mg += 10
+        total_curve = best_curve
+
     return current, total_curve
+
 
 def enforce_morning_first_20(doses, mg_limit):
     """Ensure the earliest dose (by clock time) is 20mg, adjusting mg values without changing times.
@@ -384,8 +415,8 @@ def refine_split_twenty(doses, t_axis, start_hour, step_min,
             if d["mg"] != 20: continue
             base = best[:i] + best[i+1:]
                 # Do not exceed MAX_DOSES when splitting 20 -> 10+10
-            if len(base) + 2 > MAX_DOSES:
-                continue
+                if len(base) + 2 > MAX_DOSES:
+                    continue
             for t1 in grid:
                 if violates_gap(t1, base): continue
                 for t2 in grid:
