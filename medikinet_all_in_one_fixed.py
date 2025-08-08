@@ -384,8 +384,8 @@ def refine_split_twenty(doses, t_axis, start_hour, step_min,
             if d["mg"] != 20: continue
             base = best[:i] + best[i+1:]
                 # Do not exceed MAX_DOSES when splitting 20 -> 10+10
-                if len(base) + 2 > MAX_DOSES:
-                    continue
+            if len(base) + 2 > MAX_DOSES:
+                continue
             for t1 in grid:
                 if violates_gap(t1, base): continue
                 for t2 in grid:
