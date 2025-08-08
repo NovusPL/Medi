@@ -45,6 +45,25 @@ def simulate_total(t_axis, doses, start_hour):
         parts.append((f"ER {d['mg']}mg @ {d['time_str']}" + (" (fed)" if d["fed"] else " (fasted)"), er))
     return total, parts
 
+def compute_t_min(doses, start_hour):
+    """Return earliest time (possibly negative) to include on the t-axis
+    so that we see peaks from doses taken before start_hour.
+    """
+    t_min = 0.0
+    for d in doses or []:
+        # relative time of taking the dose
+        hh, mm = map(int, d["time_str"].split(":"))
+        t0 = (hh + mm/60) - start_hour  # can be negative
+        # tmax and sigmas
+        ir_tmax, er_tmax = (1.5, 4.5) if d.get("fed", False) else (1.0, 3.0)
+        ir_sigma, er_sigma = 0.5, 1.2
+        # earliest relevant times ~ (center - 3*sigma)
+        cand_ir = t0 + ir_tmax - 3*ir_sigma
+        cand_er = t0 + er_tmax - 3*er_sigma
+        t_min = min(t_min, cand_ir, cand_er)
+    # clamp to a sensible floor to avoid huge canvases
+    return max(t_min, -12.0)
+
 def safe_trapz(y, x):
     y = np.asarray(y); x = np.asarray(x)
     if y.size < 2 or x.size < 2: return 0.0
@@ -85,18 +104,23 @@ def simulator_ui():
                     st.rerun()
                 except Exception:
                     st.experimental_rerun()
+        # dynamic time axis to include pre-start doses
+        t_min = compute_t_min(st.session_state.sim_doses, start_hour)
+        t = np.linspace(t_min, duration_h, int((duration_h - t_min)*60))
         total, parts = simulate_total(t, st.session_state.sim_doses, start_hour)
     else:
+        # no doses; default axis
+        t = np.linspace(0, duration_h, int(duration_h*60))
         total, parts = np.zeros_like(t), []
         st.info("No doses yet.")
-    fig = plt.figure(figsize=(10,5))
+    fig = plt.figure(figsize=(8,4))
     plt.plot(start_hour+t, total, label="Total concentration")
     if st.checkbox("Show IR/ER components", True, key="sim_show"):
         for lbl, y in parts:
             plt.plot(start_hour+t, y, "--", label=lbl)
     plt.xlabel("Hour of day"); plt.ylabel("Conc. (arb.)"); plt.title("Simulator")
     plt.grid(True, linestyle="--", alpha=0.5); plt.legend()
-    st.pyplot(fig)
+    st.pyplot(fig, use_container_width=True)
 
 # ===== Optimizer =====
 def objective(total_curve, t_axis, target_start, target_end, lam_out, lam_rough, lam_peak, start_hour):
@@ -260,14 +284,16 @@ def optimizer_ui():
         st.warning("No positive-gain schedule under current penalties. Tip: lower λ_smooth/λ_peak or widen the window/buffer.")
 
     # chart (always render something)
-    total_all, components = simulate_total(np.linspace(0, duration_h, int(duration_h*60)), opt_doses, start_hour) if opt_doses else (np.zeros(int(duration_h*60)), [])
-    fig = plt.figure(figsize=(10,5))
-    plt.plot(start_hour+np.linspace(0, duration_h, int(duration_h*60)), total_all, label="Total concentration")
+    # dynamic axis so doses before start are visible
+    t_min = compute_t_min(opt_doses, start_hour) if opt_doses else 0.0
+    t_plot = np.linspace(t_min, duration_h, int((duration_h - t_min)*60))
+    total_all, components = simulate_total(t_plot, opt_doses, start_hour) if opt_doses else (np.zeros_like(t_plot), [])
+    fig = plt.figure(figsize=(8,4))
+    plt.plot(start_hour+t_plot, total_all, label="Total concentration")
     if st.checkbox("Show IR/ER components", True, key="opt_show"):
         for lbl, y in components:
-            plt.plot(start_hour+np.linspace(0, duration_h, int(duration_h*60)), y, "--", label=lbl)
+            plt.plot(start_hour+t_plot, y, "--", label=lbl)
 
-    # paint target window
     if target_end >= target_start:
         plt.axvspan(target_start, target_end, alpha=0.12, label="Target window")
     else:
@@ -276,7 +302,7 @@ def optimizer_ui():
 
     plt.xlabel("Hour of day"); plt.ylabel("Conc. (arb.)"); plt.title("Optimizer")
     plt.grid(True, linestyle="--", alpha=0.5); plt.legend()
-    st.pyplot(fig)
+    st.pyplot(fig, use_container_width=True)
 
     if debug:
         st.json({"picked_doses": opt_doses, "total_mg": total_mg})
