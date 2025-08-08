@@ -58,6 +58,13 @@ def simulate_total(t_axis, doses, start_hour):
         parts.append((f"ER {d['mg']:.0f}mg @ {d['time_str']}" + (" (fed)" if d["fed"] else " (fasted)"), er))
     return total, parts
 
+def safe_trapz(y, x):
+    y = np.asarray(y)
+    x = np.asarray(x)
+    if y.size < 2 or x.size < 2:
+        return 0.0
+    return float(np.trapz(y, x))
+
 # ====== Shared controls ======
 with st.sidebar:
     mode = st.selectbox("Mode", ["Simulator", "Optimizer"])
@@ -246,9 +253,9 @@ def optimizer_ui():
         else:
             inside = (hours >= target_start) | (hours <= target_end)
 
-        # Areas under curve
-        area_inside  = float(np.trapz(total_curve[inside],  t_axis))
-        area_outside = float(np.trapz(total_curve[~inside], t_axis))
+        # Areas under curve: use masked x to match y length
+        area_inside  = safe_trapz(total_curve[inside],  t_axis[inside])
+        area_outside = safe_trapz(total_curve[~inside], t_axis[~inside])
 
         # Roughness via integral of (dc/dt)^2
         dcdt  = np.gradient(total_curve, t_axis)
@@ -428,13 +435,12 @@ def optimizer_ui():
     # Diagnostics
     if st.checkbox("Show objective diagnostics", value=False):
         hours = start_hour + t
-        # window mask
         if target_end >= target_start:
             inside = (hours >= target_start) & (hours <= target_end)
         else:
             inside = (hours >= target_start) | (hours <= target_end)
-        area_inside  = float(np.trapz(total_all[inside],  t))
-        area_outside = float(np.trapz(total_all[~inside], t))
+        area_inside  = safe_trapz(total_all[inside],  t[inside])
+        area_outside = safe_trapz(total_all[~inside], t[~inside])
         dcdt = np.gradient(total_all, t)
         rough = float(np.trapz(dcdt**2, t))
         peak  = float(np.max(total_all))
