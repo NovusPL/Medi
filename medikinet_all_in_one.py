@@ -230,7 +230,8 @@ def optimizer_ui():
         lambda_out  = st.slider("Penalty outside window", 0.0, 10.0, 0.5, 0.1)
     with c2:
         target_end   = st.number_input("Target end", 0, 23, 19)
-        lambda_rough = st.slider("Smoothness penalty (λ)", 0.0, 50.0, 5.0, 0.5)
+        lambda_rough = st.slider("Smoothness penalty (λ)", 0.0, 1.0, 0.0, 0.01,
+                                  help="Penalizes rapid fluctuations (wiggles). 0 = off, 1 = strong.")
     with c3:
         daily_limit  = st.number_input("Daily mg limit", 10, 120, 40, 10)
         lambda_peak  = st.slider("Peak penalty (λ_peak)", 0.0, 5.0, 1.0, 0.1)
@@ -238,7 +239,8 @@ def optimizer_ui():
     with c4:
         step_min = st.selectbox("Time granularity (min)", [15,30,60], index=1)
     with c5:
-        cand_buffer_h = st.slider("Candidate buffer ±h", 0.0, 4.0, 2.0, 0.5)
+        cand_buffer_h = st.slider("Candidate buffer ±h", 0.0, 4.0, 2.0, 0.5,
+                                 help="How far OUTSIDE your target window to consider dose times. Example: window 9–19 with buffer 2h allows candidates from 7 to 21. Useful to place a dose just before the window to ramp up coverage.")
     with c6:
         min_gap_min = st.slider("Min gap between doses (min)", 0, 240, 60, 15)
     fed = st.checkbox("Assume doses with food (slower)", False)
