@@ -45,6 +45,26 @@ def simulate_total(t_axis, doses, start_hour):
         parts.append((f"ER {d['mg']}mg @ {d['time_str']}" + (" (fed)" if d["fed"] else " (fasted)"), er))
     return total, parts
 
+
+def compute_t_end(total_curve, t_axis, start_hour):
+    """Return latest t (hours-from-start) to plot.
+    Stop at 23:00 or when curve ~0 (1% of peak), whichever is earlier.
+    """
+    import numpy as _np
+    if total_curve is None or _np.allclose(total_curve, 0):
+        return 0.0
+    peak = float(_np.max(total_curve))
+    if peak <= 1e-12:
+        return 0.0
+    eps = 0.01 * peak
+    idx = _np.where(total_curve > eps)[0]
+    if idx.size == 0:
+        return 0.0
+    # small margin to show the tail
+    last_t = float(t_axis[int(idx[-1])]) + 0.25
+    # cap by 23:00
+    return min(last_t, 23.0 - start_hour)
+
 def compute_t_min(doses, start_hour):
     """Return earliest time (possibly negative) to include on the t-axis
     so that we see peaks from doses taken before start_hour.
@@ -108,6 +128,9 @@ def simulator_ui():
         t_min = compute_t_min(st.session_state.sim_doses, start_hour)
         t = np.linspace(t_min, duration_h, int((duration_h - t_min)*60))
         total, parts = simulate_total(t, st.session_state.sim_doses, start_hour)
+        t_end = compute_t_end(total, t, start_hour)
+        t = np.linspace(t_min, t_end, max(2, int((t_end - t_min)*60)))
+        total, parts = simulate_total(t, st.session_state.sim_doses, start_hour)
     else:
         # no doses; default axis
         t = np.linspace(0, duration_h, int(duration_h*60))
@@ -120,6 +143,15 @@ def simulator_ui():
             plt.plot(start_hour+t, y, "--", label=lbl)
     plt.xlabel("Hour of day"); plt.ylabel("Conc. (arb.)"); plt.title("Simulator")
     plt.grid(True, linestyle="--", alpha=0.5); plt.legend()
+    if not st.session_state.get("sim_show", True) and st.session_state.sim_doses:
+        for d in st.session_state.sim_doses:
+            hh, mm = map(int, d["time_str"].split(":"))
+            x = hh + mm/60.0
+            plt.axvline(x, alpha=0.2, linestyle=":")
+            if (start_hour + t[0]) <= x <= (start_hour + t[-1]):
+                import numpy as _np
+                y = _np.interp(x - start_hour, t, total)
+                plt.scatter([x], [y], marker="o")
     st.pyplot(fig, use_container_width=True)
 
 # ===== Optimizer =====
@@ -185,6 +217,37 @@ def greedy_optimize(start_hour, duration_h, mg_limit, fed, step_min,
         used_mg += best["mg"]
         if used_mg + 10 > mg_limit: break
     return current, current_total, t_axis
+
+def trim_to_mg_limit(doses, t_axis, start_hour, mg_limit,
+                        lam_out, lam_rough, lam_peak, target_start, target_end):
+    """Ensure sum(mg) <= mg_limit by removing the least harmful doses first."""
+    def score(curve):
+        return objective(curve, t_axis, target_start, target_end, lam_out, lam_rough, lam_peak, start_hour)
+    doses = doses[:]
+    if not doses: 
+        return doses
+    base_curve, _ = simulate_total(t_axis, doses, start_hour)
+    base_score = score(base_curve)
+    while sum(d['mg'] for d in doses) > mg_limit and doses:
+        best_idx = None
+        best_drop = float('inf')
+        # pick the dose whose removal hurts the score the least
+        for i in range(len(doses)):
+            trial = doses[:i] + doses[i+1:]
+            trial_curve, _ = simulate_total(t_axis, trial, start_hour)
+            s = score(trial_curve)
+            drop = base_score - s
+            if drop < best_drop - 1e-12:
+                best_drop = drop
+                best_idx = i
+                best_trial_curve = trial_curve
+                best_trial_score = s
+        if best_idx is None:
+            break
+        doses.pop(best_idx)
+        base_curve = best_trial_curve
+        base_score = best_trial_score
+    return doses
 
 def refine_split_twenty(doses, t_axis, start_hour, step_min,
                         lam_out, lam_rough, lam_peak, target_start, target_end, min_gap_min):
@@ -256,9 +319,17 @@ def optimizer_ui():
         opt_doses, opt_curve, t_axis = greedy_optimize(start_hour, duration_h, int(daily_limit), fed, int(step_min),
                                                        lambda_out, lambda_rough, lambda_peak,
                                                        target_start, target_end, cand_buffer_h, int(min_gap_min))
-        opt_doses, opt_curve = refine_split_twenty(opt_doses, t_axis, start_hour, int(step_min),
-                                                   lambda_out, lambda_rough, lambda_peak,
-                                                   target_start, target_end, int(min_gap_min))
+        opt_doses, opt_curve = refine_split_twenty(
+        opt_doses, t_axis, start_hour, int(step_min),
+        lambda_out, lambda_rough, lambda_peak,
+        target_start, target_end, int(min_gap_min)
+    )
+    # Hard cap: never exceed mg limit
+    if sum(d['mg'] for d in opt_doses) > int(daily_limit):
+        opt_doses = trim_to_mg_limit(opt_doses, t_axis, start_hour, int(daily_limit),
+                                     lambda_out, lambda_rough, lambda_peak, target_start, target_end)
+        # recompute curve after trimming
+        opt_curve, _ = simulate_total(t_axis, opt_doses, start_hour)
         st.session_state["_opt_last"] = {
             "doses": opt_doses,
             "curve": opt_curve,
@@ -279,6 +350,10 @@ def optimizer_ui():
 
     # show result string
     total_mg = sum(d["mg"] for d in opt_doses)
+    if total_mg > int(daily_limit):
+        opt_doses = trim_to_mg_limit(opt_doses, np.linspace(0, duration_h, int(duration_h*60)), start_hour, int(daily_limit),
+                                     lambda_out, lambda_rough, lambda_peak, target_start, target_end)
+        total_mg = sum(d["mg"] for d in opt_doses)
     if opt_doses:
         schedule_str = ", ".join([f"{d['mg']}mg @{d['time_str']}" for d in opt_doses])
         st.success(f"Optimized schedule ({total_mg} / {int(daily_limit)} mg): {schedule_str}")
@@ -286,15 +361,28 @@ def optimizer_ui():
         st.warning("No positive-gain schedule under current penalties. Tip: lower λ_smooth/λ_peak or widen the window/buffer.")
 
     # chart (always render something)
-    # dynamic axis so doses before start are visible
     t_min = compute_t_min(opt_doses, start_hour) if opt_doses else 0.0
-    t_plot = np.linspace(t_min, duration_h, int((duration_h - t_min)*60))
+    # first pass to estimate end
+    t_coarse = np.linspace(t_min, duration_h, int((duration_h - t_min)*60))
+    total_coarse, _ = simulate_total(t_coarse, opt_doses, start_hour) if opt_doses else (np.zeros_like(t_coarse), [])
+    t_end = compute_t_end(total_coarse, t_coarse, start_hour) if opt_doses else min(duration_h, 23.0 - start_hour)
+    t_plot = np.linspace(t_min, t_end, max(2, int((t_end - t_min)*60)))
     total_all, components = simulate_total(t_plot, opt_doses, start_hour) if opt_doses else (np.zeros_like(t_plot), [])
     fig = plt.figure(figsize=(8,4))
     plt.plot(start_hour+t_plot, total_all, label="Total concentration")
-    if st.checkbox("Show IR/ER components", True, key="opt_show"):
+    show_parts = st.checkbox("Show IR/ER components", True, key="opt_show")
+    if show_parts and components:
         for lbl, y in components:
             plt.plot(start_hour+t_plot, y, "--", label=lbl)
+    if (not show_parts) and opt_doses:
+        for d in opt_doses:
+            hh, mm = map(int, d["time_str"].split(":"))
+            x = hh + mm/60.0
+            plt.axvline(x, alpha=0.2, linestyle=":")
+            if (start_hour + t_plot[0]) <= x <= (start_hour + t_plot[-1]):
+                import numpy as _np
+                y = _np.interp(x - start_hour, t_plot, total_all)
+                plt.scatter([x], [y], marker="o")
 
     if target_end >= target_start:
         plt.axvspan(target_start, target_end, alpha=0.12, label="Target window")
@@ -304,6 +392,42 @@ def optimizer_ui():
 
     plt.xlabel("Hour of day"); plt.ylabel("Conc. (arb.)"); plt.title("Optimizer")
     plt.grid(True, linestyle="--", alpha=0.5); plt.legend()
+
+    # --- Dynamic x-limit: end at 23:00 or earlier if curve ~ 0 ---
+    try:
+        x_start = start_hour + t_plot[0] if 't_plot' in locals() else start_hour + t[0]
+        x_time  = start_hour + (t_plot if 't_plot' in locals() else t)
+        y_total = total_all if 'total_all' in locals() else total
+        max_y = float(np.max(y_total)) if y_total.size else 0.0
+        thr = max(1e-6, 0.02 * max_y)
+        last_idx = None
+        if y_total.size:
+            nz = np.where(y_total > thr)[0]
+            if nz.size:
+                last_idx = nz[-1]
+        if last_idx is not None:
+            x_end_curve = float(x_time[int(last_idx)]) + 0.5  # small padding
+        else:
+            x_end_curve = float(x_time[-1]) if y_total.size else (start_hour + (duration_h if 'duration_h' in locals() else 12))
+        x_end_clock = 23.0
+        x_end = min(x_end_curve, x_end_clock)
+        if x_end <= x_start + 0.5:
+            x_end = min(x_end_clock, x_start + 1.0)  # ensure some width
+        plt.xlim(x_start, x_end)
+    except Exception:
+        pass
+
+    # --- Dose markers when components are hidden ---
+
+    show_parts = st.session_state.get("opt_show", True)
+    if not show_parts and opt_doses:
+        for d in opt_doses:
+            hh, mm = map(int, d["time_str"].split(":"))
+            t0 = (hh + mm/60) - start_hour
+            plt.axvline(start_hour + t0, linestyle=":", alpha=0.7)
+            idx = int(np.argmin(np.abs(t_plot - t0)))
+            if 0 <= idx < len(t_plot):
+                plt.scatter(start_hour + t_plot[idx], total_all[idx])
     st.pyplot(fig, use_container_width=True)
 
     if debug:
