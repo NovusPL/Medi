@@ -205,6 +205,7 @@ def simulator_ui():
     plt.legend()
     st.pyplot(fig)
 
+
 # ====== Optimizer UI ======
 def optimizer_ui():
     st.subheader("Optimizer")
@@ -244,6 +245,8 @@ def optimizer_ui():
     lambda_outside = st.slider("Penalty outside window", 0.0, 10.0, st.session_state.get("opt_lout", 0.5), 0.1, key="opt_lout")
     lambda_peak    = st.slider("Peak penalty (λ_peak)", 0.0, 5.0,  st.session_state.get("opt_lpeak", 1.0), 0.1, key="opt_lpeak")
 
+    debug = st.checkbox("Show optimizer debug logs", value=False, key="opt_debug")
+
     def objective(total_curve, t_axis, target_start, target_end,
                   lam_out, lam_rough, lam_peak, start_hour):
         # mask of target window
@@ -268,8 +271,10 @@ def optimizer_ui():
 
     def greedy_optimize(start_hour, duration_h, mg_limit, fed, time_step_minutes,
                         lambda_outside, lambda_rough, lambda_peak,
-                        target_start, target_end):
-        # Greedy addition on discrete time grid until mg_limit used
+                        target_start, target_end, debug=False):
+        # Greedy addition on discrete time grid until mg_limit used.
+        # Robust version: always picks at least ONE dose if mg_limit allows,
+        # by selecting the highest absolute score candidate when no positive gain exists.
         t_axis = np.linspace(0, duration_h, int(duration_h * 60))
         current = []
         current_total, _ = simulate_total(t_axis, current, start_hour)
@@ -282,36 +287,70 @@ def optimizer_ui():
             return objective(curve, t_axis, target_start, target_end,
                              lambda_outside, lambda_rough, lambda_peak, start_hour)
 
-        improved = True
-        while improved:
-            improved = False
-            best_gain = 0.0
-            best_add = None
-            best_total = None
+        logs = []
+        iteration = 0
+        while True:
+            iteration += 1
             base_score = score(current_total)
+            best_gain = -np.inf
+            best_abs_score = -np.inf
+            best_add = None
+            best_abs_add = None
+            best_total = None
+            best_abs_total = None
+
             for tstr in times_str:
                 for dose in (10, 20):
                     if used_mg + dose > mg_limit:
                         continue
                     trial = current + [{"time_str": tstr, "mg": dose, "fed": fed}]
                     trial_total, _ = simulate_total(t_axis, trial, start_hour)
-                    gain = score(trial_total) - base_score
-                    if gain > best_gain + 1e-9:
+                    s = score(trial_total)
+                    gain = s - base_score
+                    if s > best_abs_score + 1e-12:
+                        best_abs_score = s
+                        best_abs_add = {"time_str": tstr, "mg": dose, "fed": fed}
+                        best_abs_total = trial_total
+                    if gain > best_gain + 1e-12:
                         best_gain = gain
                         best_add = {"time_str": tstr, "mg": dose, "fed": fed}
                         best_total = trial_total
-            if best_add is not None:
+
+            if best_add is None:
+                # no candidates fit mg_limit
+                break
+
+            # Accept rule:
+            #  - if we already have something on the board, require positive gain
+            #  - if this is the first pick and no positive gain exists, take the best absolute score
+            if used_mg == 0 and best_gain <= 1e-12:
+                # pick best_abs_add even if gain <= 0
+                current.append(best_abs_add)
+                current_total = best_abs_total
+                used_mg += best_abs_add["mg"]
+                logs.append(f"[iter {iteration}] forced first pick: {best_abs_add} (score={best_abs_score:.4f})")
+            elif best_gain > 1e-12:
                 current.append(best_add)
                 current_total = best_total
                 used_mg += best_add["mg"]
-                improved = True
+                logs.append(f"[iter {iteration}] added {best_add} (gain={best_gain:.4f})")
             else:
+                # no positive improvement; stop
+                logs.append(f"[iter {iteration}] stopping (no positive gain).")
                 break
+
+            # stop if we used up the mg limit tightly
+            if used_mg + 10 > mg_limit:  # cannot add even smallest dose
+                logs.append(f"[iter {iteration}] stopping (mg limit reached).")
+                break
+
+        if debug:
+            st.code("\\n".join(logs) if logs else "No logs.", language="text")
         return current, current_total, t_axis
 
     def refine_split_twenty(doses, t_axis, start_hour, time_step_minutes,
                             lambda_outside, lambda_rough, lambda_peak,
-                            target_start, target_end):
+                            target_start, target_end, debug=False):
         # Try turning any 20mg dose into two 10mg at possibly different times
         if not doses:
             return doses, simulate_total(t_axis, doses, start_hour)[0]
@@ -326,10 +365,13 @@ def optimizer_ui():
         best = doses[:]
         best_curve, _ = simulate_total(t_axis, best, start_hour)
         best_score = score(best_curve)
+        logs = []
 
         improved = True
+        outer_iter = 0
         while improved:
             improved = False
+            outer_iter += 1
             for i, d in enumerate(list(best)):
                 if d["mg"] != 20:
                     continue
@@ -342,27 +384,30 @@ def optimizer_ui():
                         ]
                         trial_curve, _ = simulate_total(t_axis, trial, start_hour)
                         s = score(trial_curve)
-                        if s > best_score + 1e-9:
+                        if s > best_score + 1e-12:
                             best, best_curve, best_score = trial, trial_curve, s
                             improved = True
+                            logs.append(f"[refine {outer_iter}] split 20→10+10 at {t1},{t2} improved score to {s:.4f}")
                             break
                     if improved:
                         break
+        if debug:
+            st.code("\\n".join(logs) if logs else "No refinement changes.", language="text")
         return best, best_curve
 
-    col_btn1, col_btn2 = st.columns([1,1])
+    col_btn1, col_btn2, col_btn3 = st.columns([1,1,1])
     with col_btn1:
         if st.button("Optimize"):
             opt_doses, opt_curve, t_axis = greedy_optimize(
                 start_hour, duration_h, int(daily_mg_limit), opt_fed, int(time_step_min),
                 lambda_outside, lambda_rough, lambda_peak,
-                target_start, target_end
+                target_start, target_end, debug=debug
             )
             # local refinement (20 -> 10+10)
             opt_doses, opt_curve = refine_split_twenty(
                 opt_doses, t_axis, start_hour, int(time_step_min),
                 lambda_outside, lambda_rough, lambda_peak,
-                target_start, target_end
+                target_start, target_end, debug=debug
             )
             if not opt_doses:
                 st.warning("No feasible schedule found under the given mg limit and window. Try increasing the limit or widening the window.")
@@ -382,6 +427,16 @@ def optimizer_ui():
                 st.rerun()
             except AttributeError:
                 st.experimental_rerun()
+    with col_btn3:
+        if st.button("Run self-tests"):
+            try:
+                results = run_self_tests()
+                st.success("All tests passed.")
+                st.json(results)
+            except AssertionError as e:
+                st.error(f"Test failed: {e}")
+            except Exception as e:
+                st.exception(e)
 
     # Presets section (save/load)
     with st.expander("Presets"):
