@@ -197,9 +197,90 @@ def times_in_window_grid(start_hour, duration_h, step_min, target_start, target_
     cands = [h for h in grid if in_expanded(h)]
     return [f"{int(h)%24:02d}:{int(round((h%1)*60))%60:02d}" for h in cands]
 
+
+def fill_to_limit(current, t_axis, start_hour, mg_limit, fed, step_min,
+                  lam_out, lam_rough, lam_peak,
+                  target_start, target_end, buffer_h, min_gap_min):
+    """Greedily add doses (10/20 mg) by best absolute score until reaching mg_limit or MAX_DOSES."""
+    def score(curve):
+        return objective(curve, t_axis, target_start, target_end, lam_out, lam_rough, lam_peak, start_hour)
+    # Build candidate grid
+    cand_times = times_in_window_grid(start_hour, int(t_axis[-1]), step_min, target_start, target_end, buffer_h)
+    def violates_gap(tstr, picks):
+        def parse(tstr): 
+            hh, mm = map(int, tstr.split(":")); return hh + mm/60.0
+        for d in picks:
+            if abs((parse(tstr) - parse(d['time_str']) + 12) % 24 - 12) < (min_gap_min/60.0):
+                return True
+        return False
+
+    # Current state
+    total_curve, _ = simulate_total(t_axis, current, start_hour)
+    used_mg = sum(d['mg'] for d in current)
+
+    while used_mg + 10 <= mg_limit and len(current) < MAX_DOSES:
+        best_s = None
+        best_add = None
+        best_curve = None
+        for tstr in cand_times:
+            if violates_gap(tstr, current):
+                continue
+            for dose in (20, 10):  # prefer 20 when filling
+                if used_mg + dose > mg_limit: 
+                    continue
+                trial = current + [{"time_str": tstr, "mg": dose, "fed": fed}]
+                trial_curve, _ = simulate_total(t_axis, trial, start_hour)
+                s = score(trial_curve)
+                if (best_s is None) or (s > best_s + 1e-12):
+                    best_s, best_add, best_curve = s, {"time_str": tstr, "mg": dose, "fed": fed}, trial_curve
+        if best_add is None:
+            break
+        current.append(best_add)
+        used_mg += best_add["mg"]
+        total_curve = best_curve
+    return current, total_curve
+
+def enforce_morning_first_20(doses, mg_limit):
+    """Ensure the earliest dose (by clock time) is 20mg, adjusting mg values without changing times.
+    - If a later 20 exists, swap mg amounts with the earliest.
+    - Else if all are 10mg and limit allows +10, upgrade earliest to 20mg.
+    - Else, if upgrading would exceed limit, try to remove the last 10mg and upgrade earliest.
+    """
+    if not doses:
+        return doses
+    # find earliest by clock time (HH:MM lexical works here)
+    # To handle wrap, compare in minutes since midnight
+    def to_minutes(d):
+        hh, mm = map(int, d["time_str"].split(":"))
+        return hh*60 + mm
+    idx_sorted = sorted(range(len(doses)), key=lambda i: to_minutes(doses[i]))
+    first_idx = idx_sorted[0]
+    if doses[first_idx]["mg"] == 20:
+        return doses
+    # look for any other 20mg
+    idx20 = next((i for i in range(len(doses)) if doses[i]["mg"] == 20), None)
+    total_mg = sum(d["mg"] for d in doses)
+    if idx20 is not None:
+        # swap mg
+        doses[first_idx]["mg"], doses[idx20]["mg"] = doses[idx20]["mg"], doses[first_idx]["mg"]
+        return doses
+    # all 10mg
+    if total_mg + 10 <= mg_limit and len(doses) <= MAX_DOSES:
+        doses[first_idx]["mg"] = 20
+        return doses
+    # try to remove the last (by time) 10mg and upgrade earliest
+    if len(doses) >= 2:
+        last_idx = idx_sorted[-1]
+        if doses[last_idx]["mg"] == 10:
+            # remove last, upgrade first
+            doses.pop(last_idx)
+            doses[first_idx]["mg"] = 20
+            return doses
+    return doses
 def greedy_optimize(start_hour, duration_h, mg_limit, fed, step_min,
                     lam_out, lam_rough, lam_peak,
-                    target_start, target_end, buffer_h, min_gap_min):
+                    target_start, target_end, buffer_h, min_gap_min,
+                    force_use_all=False):
     t_axis = np.linspace(0, duration_h, int(duration_h * 60))
     current = []
     current_total, _ = simulate_total(t_axis, current, start_hour)
@@ -224,6 +305,7 @@ def greedy_optimize(start_hour, duration_h, mg_limit, fed, step_min,
             break
         base = score(current_total)
         best_gain, best = 0.0, None
+        best_abs_s, best_abs_add, best_abs_curve = None, None, None
         for tstr in cand_times:
             if len(current) >= MAX_DOSES:
                 break
@@ -233,10 +315,17 @@ def greedy_optimize(start_hour, duration_h, mg_limit, fed, step_min,
                 if violates_gap(tstr, current): continue
                 trial = current + [{"time_str": tstr, "mg": dose, "fed": fed}]
                 trial_total, _ = simulate_total(t_axis, trial, start_hour)
-                gain = score(trial_total) - base
+                s = score(trial_total)
+                gain = s - base
                 if gain > best_gain + 1e-12:
                     best_gain, best = gain, {"time_str": tstr, "mg": dose, "fed": fed, "_total": trial_total}
-        if best is None: break
+                if (best_abs_s is None) or (s > best_abs_s + 1e-12):
+                    best_abs_s, best_abs_add, best_abs_curve = s, {"time_str": tstr, "mg": dose, "fed": fed, "_total": trial_total}, trial_total
+        if best is None:
+            if force_use_all and (sum(d['mg'] for d in current) + 10 <= mg_limit) and (len(current) < MAX_DOSES) and best_abs_add is not None:
+                best = best_abs_add
+            else:
+                break
         current.append({k:v for k,v in best.items() if k!='_total'})
         current_total = best["_total"]
         used_mg += best["mg"]
@@ -295,8 +384,8 @@ def refine_split_twenty(doses, t_axis, start_hour, step_min,
             if d["mg"] != 20: continue
             base = best[:i] + best[i+1:]
                 # Do not exceed MAX_DOSES when splitting 20 -> 10+10
-            if len(base) + 2 > MAX_DOSES:
-                continue
+                if len(base) + 2 > MAX_DOSES:
+                    continue
             for t1 in grid:
                 if violates_gap(t1, base): continue
                 for t2 in grid:
@@ -336,6 +425,10 @@ def optimizer_ui():
         min_gap_min = st.slider("Min gap between doses (min)", 0, 240, 120, 15)
     fed = st.checkbox("Assume doses with food (slower)", False)
     debug = st.checkbox("Show debug info", False)
+    use_all_limit = st.checkbox("Use all allowed medication (fill up to limit)", False,
+                                 help="When on, the optimizer will keep adding doses until it reaches the mg limit (subject to max doses and gap).")
+    morning_20 = st.checkbox("Stronger morning than afternoon (first dose 20 mg)", False,
+                              help="Enforces the earliest dose to be 20 mg; others unchanged. If needed, swaps with a later 20 mg or upgrades/removes a 10 mg to respect the limit.")
     st.caption("**Max doses/day:** 3 (fixed)")
     auto_opt = st.checkbox("Auto‑optimize on change", True)
     run_click = st.button("Optimize")
@@ -347,7 +440,7 @@ def optimizer_ui():
         # run greedy + refine
         opt_doses, opt_curve, t_axis = greedy_optimize(start_hour, duration_h, int(daily_limit), fed, int(step_min),
                                                        lambda_out, lambda_rough, lambda_peak,
-                                                       target_start, target_end, cand_buffer_h, int(min_gap_min))
+                                                       target_start, target_end, cand_buffer_h, int(min_gap_min), force_use_all=use_all_limit)
         opt_doses, opt_curve = refine_split_twenty(opt_doses, t_axis, start_hour, int(step_min),
                                                    lambda_out, lambda_rough, lambda_peak,
                                                    target_start, target_end, int(min_gap_min))
@@ -355,6 +448,15 @@ def optimizer_ui():
         if sum(d['mg'] for d in opt_doses) > int(daily_limit):
             opt_doses = trim_to_mg_limit(opt_doses, t_axis, start_hour, int(daily_limit),
                                          lambda_out, lambda_rough, lambda_peak, target_start, target_end)
+            opt_curve, _ = simulate_total(t_axis, opt_doses, start_hour)
+        # Optionally fill up to limit (<= MAX_DOSES)
+        if use_all_limit and sum(d['mg'] for d in opt_doses) + 10 <= int(daily_limit):
+            opt_doses, opt_curve = fill_to_limit(opt_doses, t_axis, start_hour, int(daily_limit), fed, int(step_min),
+                                                 lambda_out, lambda_rough, lambda_peak,
+                                                 target_start, target_end, cand_buffer_h, int(min_gap_min))
+        # Optionally enforce 20mg first dose
+        if morning_20:
+            opt_doses = enforce_morning_first_20(opt_doses, int(daily_limit))
             opt_curve, _ = simulate_total(t_axis, opt_doses, start_hour)
         # stamp latest results so user sees change
         import datetime as _dt
