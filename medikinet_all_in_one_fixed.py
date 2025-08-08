@@ -94,8 +94,12 @@ with st.sidebar:
     mode = st.selectbox("Mode", ["Simulator", "Optimizer"], index=1)
     start_hour = st.number_input("Plot start hour", 0, 23, 8)
     duration_h = st.slider("Duration (hours)", 6, 24, 12)
-    chart_height = st.slider("Chart height (px)", 220, 600, 280, 10,
+    chart_height = st.slider("Chart height (px)", 120, 600, 240, 10,
                              help="Adjust plot height to fit your screen.")
+    use_container = st.checkbox("Use container width (full)", False,
+                             help="If on, chart spans the full content width and keeps aspect ratio. Turn OFF to control exact width.")
+    chart_width = st.slider("Chart width (px)", 400, 1200, 700, 10,
+                             help="Only used when full-width is OFF.")
     compact = st.checkbox("Compact chart mode", True,
                           help="Tighter margins and smaller legend labels.")
 
@@ -140,7 +144,8 @@ def simulator_ui():
         t = np.linspace(0, duration_h, int(duration_h*60))
         total, parts = np.zeros_like(t), []
         st.info("No doses yet.")
-    fig = plt.figure(figsize=(8, chart_height/96.0))
+    fig = plt.figure(figsize=((chart_width/100.0) if not use_container else 8,
+                                        chart_height/100.0), dpi=100)
     plt.plot(start_hour+t, total, label="Total concentration")
     if st.checkbox("Show IR/ER components", True, key="sim_show"):
         for lbl, y in parts:
@@ -157,7 +162,8 @@ def simulator_ui():
                 y = _np.interp(x - start_hour, t, total)
                 plt.scatter([x], [y], marker="o")
     plt.tight_layout(pad=(0.1 if compact else 0.5));
-    st.pyplot(fig, use_container_width=True)
+    plt.tight_layout(pad=(0.1 if compact else 0.5));
+    st.pyplot(fig, use_container_width=use_container)
 
 # ===== Optimizer =====
 def _objective_score_for_display(doses, start_hour, duration_h, target_start, target_end, lam_out, lam_rough, lam_peak):
@@ -371,7 +377,8 @@ def optimizer_ui():
     t_min = compute_t_min(opt_doses, start_hour) if opt_doses else 0.0
     t_plot = np.linspace(t_min, duration_h, int((duration_h - t_min)*60))
     total_all, components = simulate_total(t_plot, opt_doses, start_hour) if opt_doses else (np.zeros_like(t_plot), [])
-    fig = plt.figure(figsize=(8, chart_height/96.0))
+    fig = plt.figure(figsize=((chart_width/100.0) if not use_container else 8,
+                                        chart_height/100.0), dpi=100)
     plt.plot(start_hour+t_plot, total_all, label="Total concentration")
     show_components = st.checkbox("Show IR/ER components", True, key="opt_show")
     if show_components and components:
@@ -415,7 +422,8 @@ def optimizer_ui():
                 plt.scatter(start_hour + t_plot[idx], total_all[idx])
 
     plt.tight_layout(pad=(0.1 if compact else 0.5));
-    st.pyplot(fig, use_container_width=True)
+    plt.tight_layout(pad=(0.1 if compact else 0.5));
+    st.pyplot(fig, use_container_width=use_container)
 
     if debug:
         st.json({"picked_doses": opt_doses, "total_mg": total_mg})
