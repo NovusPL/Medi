@@ -183,6 +183,7 @@ def refine_split_twenty(doses, t_axis, start_hour, step_min,
                 if improved: break
     return best, best_curve
 
+
 def optimizer_ui():
     st.subheader("Optimizer")
     # inputs
@@ -205,14 +206,37 @@ def optimizer_ui():
         min_gap_min = st.slider("Min gap between doses (min)", 0, 240, 60, 15)
     fed = st.checkbox("Assume doses with food (slower)", False)
     debug = st.checkbox("Show debug info", False)
+    auto_opt = st.checkbox("Auto‑optimize on change", True)
+    run_click = st.button("Optimize")
 
-    # run greedy + refine
-    opt_doses, opt_curve, t_axis = greedy_optimize(start_hour, duration_h, int(daily_limit), fed, int(step_min),
+    # Decide whether to run the optimizer
+    should_run = auto_opt or run_click
+
+    if should_run:
+        # run greedy + refine
+        opt_doses, opt_curve, t_axis = greedy_optimize(start_hour, duration_h, int(daily_limit), fed, int(step_min),
+                                                       lambda_out, lambda_rough, lambda_peak,
+                                                       target_start, target_end, cand_buffer_h, int(min_gap_min))
+        opt_doses, opt_curve = refine_split_twenty(opt_doses, t_axis, start_hour, int(step_min),
                                                    lambda_out, lambda_rough, lambda_peak,
-                                                   target_start, target_end, cand_buffer_h, int(min_gap_min))
-    opt_doses, opt_curve = refine_split_twenty(opt_doses, t_axis, start_hour, int(step_min),
-                                               lambda_out, lambda_rough, lambda_peak,
-                                               target_start, target_end, int(min_gap_min))
+                                                   target_start, target_end, int(min_gap_min))
+        st.session_state["_opt_last"] = {
+            "doses": opt_doses,
+            "curve": opt_curve,
+            "t_axis": t_axis,
+            "params": {
+                "start_hour": start_hour, "duration_h": duration_h
+            }
+        }
+    else:
+        # reuse last result if available
+        last = st.session_state.get("_opt_last", None)
+        if last is not None:
+            opt_doses = last["doses"]
+            opt_curve = last["curve"]
+            t_axis    = last["t_axis"]
+        else:
+            opt_doses, opt_curve, t_axis = [], np.zeros_like(np.linspace(0, duration_h, int(duration_h*60))), np.linspace(0, duration_h, int(duration_h*60))
 
     # show result string
     total_mg = sum(d["mg"] for d in opt_doses)
@@ -223,12 +247,12 @@ def optimizer_ui():
         st.warning("No positive-gain schedule under current penalties. Tip: lower λ_smooth/λ_peak or widen the window/buffer.")
 
     # chart (always render something)
-    total_all, components = simulate_total(t, opt_doses, start_hour) if opt_doses else (np.zeros_like(t), [])
+    total_all, components = simulate_total(np.linspace(0, duration_h, int(duration_h*60)), opt_doses, start_hour) if opt_doses else (np.zeros(int(duration_h*60)), [])
     fig = plt.figure(figsize=(10,5))
-    plt.plot(start_hour+t, total_all, label="Total concentration")
+    plt.plot(start_hour+np.linspace(0, duration_h, int(duration_h*60)), total_all, label="Total concentration")
     if st.checkbox("Show IR/ER components", True, key="opt_show"):
         for lbl, y in components:
-            plt.plot(start_hour+t, y, "--", label=lbl)
+            plt.plot(start_hour+np.linspace(0, duration_h, int(duration_h*60)), y, "--", label=lbl)
 
     # paint target window
     if target_end >= target_start:
