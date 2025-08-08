@@ -4,6 +4,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import streamlit as st
 
+# Hard cap on number of doses suggested by optimizer
+MAX_DOSES = 3
+
 # ===== App config =====
 st.set_page_config(page_title="Medikinet CR – All‑in‑One (fixed)", layout="wide")
 st.title("Medikinet CR – All‑in‑One (fixed)")
@@ -147,7 +150,7 @@ def simulator_ui():
     fig = plt.figure(figsize=((chart_width/100.0) if not use_container else 8,
                                         chart_height/100.0), dpi=100)
     plt.plot(start_hour+t, total, label="Total concentration")
-    if st.checkbox("Show IR/ER components", True, key="sim_show"):
+    if st.checkbox("Show IR/ER components", False, key="sim_show"):
         for lbl, y in parts:
             plt.plot(start_hour+t, y, "--", label=lbl)
     plt.xlabel("Hour of day"); plt.ylabel("Conc. (arb.)"); plt.title("Simulator")
@@ -216,11 +219,17 @@ def greedy_optimize(start_hour, duration_h, mg_limit, fed, step_min,
         return objective(curve, t_axis, target_start, target_end, lam_out, lam_rough, lam_peak, start_hour)
 
     while True:
+        # Stop if we already reached max number of doses
+        if len(current) >= MAX_DOSES:
+            break
         base = score(current_total)
         best_gain, best = 0.0, None
         for tstr in cand_times:
+            if len(current) >= MAX_DOSES:
+                break
             for dose in (10,20):
                 if used_mg + dose > mg_limit: continue
+                if len(current) + 1 > MAX_DOSES: continue
                 if violates_gap(tstr, current): continue
                 trial = current + [{"time_str": tstr, "mg": dose, "fed": fed}]
                 trial_total, _ = simulate_total(t_axis, trial, start_hour)
@@ -267,7 +276,7 @@ def trim_to_mg_limit(doses, t_axis, start_hour, mg_limit,
 
 def refine_split_twenty(doses, t_axis, start_hour, step_min,
                         lam_out, lam_rough, lam_peak, target_start, target_end, min_gap_min):
-    if not doses: return doses, simulate_total(t_axis, doses, start_hour)[0]
+    if not doses or len(doses) >= MAX_DOSES: return doses, simulate_total(t_axis, doses, start_hour)[0]
     def score(curve): 
         return objective(curve, t_axis, target_start, target_end, lam_out, lam_rough, lam_peak, start_hour)
     grid = times_in_window_grid(start_hour, int(t_axis[-1]), step_min, target_start, target_end, 0.0)
@@ -285,6 +294,9 @@ def refine_split_twenty(doses, t_axis, start_hour, step_min,
         for i, d in enumerate(list(best)):
             if d["mg"] != 20: continue
             base = best[:i] + best[i+1:]
+                # Do not exceed MAX_DOSES when splitting 20 -> 10+10
+                if len(base) + 2 > MAX_DOSES:
+                    continue
             for t1 in grid:
                 if violates_gap(t1, base): continue
                 for t2 in grid:
@@ -305,11 +317,11 @@ def optimizer_ui():
     # inputs
     c1,c2,c3 = st.columns(3)
     with c1:
-        target_start = st.number_input("Target start", 0, 23, 9)
+        target_start = st.number_input("Target start", 0, 23, 8)
         lambda_out  = st.slider("Penalty outside window", 0.0, 10.0, 0.5, 0.1)
     with c2:
-        target_end   = st.number_input("Target end", 0, 23, 19)
-        lambda_rough = st.slider("Smoothness penalty (λ)", 0.0, 1.0, 0.0, 0.01,
+        target_end   = st.number_input("Target end", 0, 23, 20)
+        lambda_rough = st.slider("Smoothness penalty (λ)", 0.0, 1.0, 0.15, 0.01,
                                   help="Penalizes rapid fluctuations (wiggles). 0 = off, 1 = strong.")
     with c3:
         daily_limit  = st.number_input("Daily mg limit", 10, 120, 40, 10)
@@ -318,12 +330,13 @@ def optimizer_ui():
     with c4:
         step_min = st.selectbox("Time granularity (min)", [15,30,60], index=1)
     with c5:
-        cand_buffer_h = st.slider("Candidate buffer ±h", 0.0, 4.0, 2.0, 0.5,
+        cand_buffer_h = st.slider("Candidate buffer ±h", 0.0, 4.0, 1.0, 0.5,
                                  help="How far OUTSIDE your target window to consider dose times. Example: window 9–19 with buffer 2h allows candidates from 7 to 21. Useful to place a dose just before the window to ramp up coverage.")
     with c6:
-        min_gap_min = st.slider("Min gap between doses (min)", 0, 240, 60, 15)
+        min_gap_min = st.slider("Min gap between doses (min)", 0, 240, 120, 15)
     fed = st.checkbox("Assume doses with food (slower)", False)
     debug = st.checkbox("Show debug info", False)
+    st.caption("**Max doses/day:** 3 (fixed)")
     auto_opt = st.checkbox("Auto‑optimize on change", True)
     run_click = st.button("Optimize")
 
@@ -380,7 +393,7 @@ def optimizer_ui():
     fig = plt.figure(figsize=((chart_width/100.0) if not use_container else 8,
                                         chart_height/100.0), dpi=100)
     plt.plot(start_hour+t_plot, total_all, label="Total concentration")
-    show_components = st.checkbox("Show IR/ER components", True, key="opt_show")
+    show_components = st.checkbox("Show IR/ER components", False, key="opt_show")
     if show_components and components:
         for lbl, y in components:
             plt.plot(start_hour+t_plot, y, "--", label=lbl)
