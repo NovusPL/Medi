@@ -1,4 +1,5 @@
 
+import json
 import numpy as np
 import matplotlib.pyplot as plt
 import streamlit as st
@@ -65,7 +66,58 @@ with st.sidebar:
     duration_h = st.slider("Duration (hours)", 6, 24, 12)
     show_parts_default = True if mode == "Simulator" else False
 
-t = np.linspace(0, duration_h, duration_h * 60)  # 1-min resolution
+# ====== Preset helpers ======
+if "presets" not in st.session_state:
+    st.session_state.presets = {}  # name -> dict with fields per mode
+
+def build_preset_for_mode(mode_name):
+    if mode_name == "Simulator":
+        return {
+            "mode": "Simulator",
+            "start_hour": start_hour,
+            "duration_h": duration_h,
+            "doses": st.session_state.get("sim_doses", []),
+        }
+    else:
+        return {
+            "mode": "Optimizer",
+            "start_hour": start_hour,
+            "duration_h": duration_h,
+            "doses": st.session_state.get("opt_doses", []),
+            # Optimizer params
+            "target_start": st.session_state.get("opt_wstart", 9),
+            "target_end": st.session_state.get("opt_wend", 19),
+            "daily_mg_limit": st.session_state.get("opt_limit", 40),
+            "opt_fed": st.session_state.get("opt_fed", False),
+            "time_step_min": st.session_state.get("opt_step", 30),
+            "lambda_rough": st.session_state.get("opt_lrough", 5.0),
+            "lambda_outside": st.session_state.get("opt_lout", 0.5),
+            "lambda_peak": st.session_state.get("opt_lpeak", 1.0),
+        }
+
+def apply_preset(preset):
+    # Apply generic controls
+    st.session_state["plot_start_hour_override"] = preset.get("start_hour", 8)
+    st.session_state["plot_duration_override"] = preset.get("duration_h", 12)
+    if preset.get("mode") == "Simulator":
+        st.session_state.sim_doses = preset.get("doses", [])
+    else:
+        st.session_state.opt_doses = preset.get("doses", [])
+        # Optimizer-specific
+        st.session_state.opt_wstart = preset.get("target_start", 9)
+        st.session_state.opt_wend = preset.get("target_end", 19)
+        st.session_state.opt_limit = preset.get("daily_mg_limit", 40)
+        st.session_state.opt_fed = preset.get("opt_fed", False)
+        st.session_state.opt_step = preset.get("time_step_min", 30)
+        st.session_state.opt_lrough = preset.get("lambda_rough", 5.0)
+        st.session_state.opt_lout = preset.get("lambda_outside", 0.5)
+        st.session_state.opt_lpeak = preset.get("lambda_peak", 1.0)
+
+# Allow overrides from preset load
+start_hour = st.session_state.get("plot_start_hour_override", start_hour)
+duration_h = st.session_state.get("plot_duration_override", duration_h)
+
+t = np.linspace(0, duration_h, int(duration_h * 60))  # 1-min resolution
 
 # ====== Simulator UI ======
 def simulator_ui():
@@ -88,6 +140,33 @@ def simulator_ui():
             st.session_state.sim_doses.append({"time_str": t_str, "mg": int(add_mg), "fed": add_fed == 'Fed'})
             st.success(f"Added: {add_mg} mg at {t_str} ({'with food' if add_fed == 'Fed' else 'fasted'})")
 
+    # Presets section (save/load)
+    with st.expander("Presets"):
+        c1, c2 = st.columns([2,1])
+        with c1:
+            preset_name = st.text_input("Preset name", value="my_sim_preset")
+        with c2:
+            if st.button("💾 Save preset (JSON)", key="sim_save"):
+                preset = build_preset_for_mode("Simulator")
+                st.session_state.presets[preset_name] = preset
+                st.success(f"Saved preset '{preset_name}' in session below.")
+                st.download_button(
+                    label="Download preset JSON",
+                    data=json.dumps(preset, indent=2).encode("utf-8"),
+                    file_name=f"{preset_name}.json",
+                    mime="application/json",
+                    key="sim_dl_json"
+                )
+        st.write("**Session presets:**", list(st.session_state.presets.keys()))
+        uploaded = st.file_uploader("Load preset JSON", type=["json"], key="sim_upload")
+        if uploaded is not None:
+            try:
+                preset = json.load(uploaded)
+                apply_preset(preset)
+                st.success("Preset loaded. Scroll if the plot doesn't refresh automatically.")
+            except Exception as e:
+                st.error(f"Failed to load preset: {e}")
+
     if st.session_state.sim_doses:
         st.write("Current doses:")
         for i, d in enumerate(st.session_state.sim_doses):
@@ -97,7 +176,10 @@ def simulator_ui():
             c3.write("With food: **" + ("Yes" if d['fed'] else "No") + "**")
             if c4.button("🗑️", key=f"sim_rm_{i}"):
                 st.session_state.sim_doses.pop(i)
-                st.experimental_rerun()
+                try:
+                    st.rerun()
+                except AttributeError:
+                    st.experimental_rerun()
     else:
         st.info("No doses yet. Add some above.")
 
@@ -105,7 +187,7 @@ def simulator_ui():
 
     fig = plt.figure(figsize=(10,5))
     plt.plot(start_hour + t, total_all, label="Total concentration")
-    if st.checkbox("Show IR/ER components", value=show_parts_default, key="sim_show_parts"):
+    if st.checkbox("Show IR/ER components", value=True, key="sim_show_parts"):
         for label, y in components:
             plt.plot(start_hour + t, y, linestyle="--", label=label)
 
@@ -137,72 +219,76 @@ def optimizer_ui():
             st.session_state.opt_doses.append({"time_str": t_str, "mg": int(add_mg), "fed": add_fed == 'Fed'})
             st.success(f"Added: {add_mg} mg at {t_str} ({'with food' if add_fed == 'Fed' else 'fasted'})")
 
-    if st.session_state.opt_doses:
-        st.write("Current doses:")
-        for i, d in enumerate(st.session_state.opt_doses):
-            c1, c2, c3, c4 = st.columns([2,2,2,1])
-            c1.write(f"Time: **{d['time_str']}**")
-            c2.write(f"Dose: **{d['mg']} mg**")
-            c3.write("With food: **" + ("Yes" if d['fed'] else "No") + "**")
-            if c4.button("🗑️", key=f"opt_rm_{i}"):
-                st.session_state.opt_doses.pop(i)
-                st.experimental_rerun()
-    else:
-        st.info("No manual doses yet. You can also just use the optimizer.")
-
     st.markdown("---")
     st.header("Optimization settings")
 
     colw1, colw2, colw3 = st.columns([2,2,3])
     with colw1:
-        target_start = st.number_input("Target window start (hour)", 0, 23, 9, key="opt_wstart")
+        target_start = st.number_input("Target window start (hour)", 0, 23, st.session_state.get("opt_wstart", 9), key="opt_wstart")
     with colw2:
-        target_end = st.number_input("Target window end (hour)", 0, 23, 19, key="opt_wend")
+        target_end = st.number_input("Target window end (hour)", 0, 23, st.session_state.get("opt_wend", 19), key="opt_wend")
     with colw3:
-        daily_mg_limit = st.number_input("Daily mg limit (10–120 mg)", min_value=10, max_value=120, value=40, step=10, key="opt_limit")
+        daily_mg_limit = st.number_input("Daily mg limit (10–120 mg)", min_value=10, max_value=120, value=st.session_state.get("opt_limit", 40), step=10, key="opt_limit")
 
-    opt_fed = st.checkbox("Assume doses with food (slower) for optimization", value=False, key="opt_fed")
-    time_step_min = st.selectbox("Time granularity", options=[15, 30, 60], index=1, key="opt_step")
+    opt_fed = st.checkbox("Assume doses with food (slower) for optimization", value=st.session_state.get("opt_fed", False), key="opt_fed")
+    time_step_min = st.selectbox("Time granularity", options=[15, 30, 60], index={15:0,30:1,60:2}.get(st.session_state.get("opt_step", 30),1), key="opt_step")
 
-    lambda_rough = st.slider("Smoothness penalty (λ)", 0.0, 0.5, 0.05, 0.01, key="opt_lrough")
-    lambda_outside = st.slider("Penalty outside window", 0.0, 1.0, 0.2, 0.05, key="opt_lout")
+    lambda_rough   = st.slider("Smoothness penalty (λ)", 0.0, 50.0, st.session_state.get("opt_lrough", 5.0), 0.5, key="opt_lrough")
+    lambda_outside = st.slider("Penalty outside window", 0.0, 10.0, st.session_state.get("opt_lout", 0.5), 0.1, key="opt_lout")
+    lambda_peak    = st.slider("Peak penalty (λ_peak)", 0.0, 5.0,  st.session_state.get("opt_lpeak", 1.0), 0.1, key="opt_lpeak")
 
-    def objective(total_curve, t_axis):
-        # Higher is better: area inside window minus penalties
-        dt = (t_axis[1] - t_axis[0])
+    def objective(total_curve, t_axis, target_start, target_end,
+                  lam_out, lam_rough, lam_peak, start_hour):
+        # mask of target window
         hours = start_hour + t_axis
         if target_end >= target_start:
             inside = (hours >= target_start) & (hours <= target_end)
         else:
             inside = (hours >= target_start) | (hours <= target_end)
-        area_inside = float(np.sum(total_curve[inside]) * dt)
-        area_outside = float(np.sum(total_curve[~inside]) * dt)
-        rough = float(np.sum(np.diff(total_curve)**2))
-        return area_inside - lambda_outside*area_outside - lambda_rough*rough
 
-    def greedy_optimize(start_hour, duration_h, mg_limit, fed, time_step_minutes):
-        # Greedy addition of 10/20 mg doses on a discrete time grid
-        t_axis = np.linspace(0, duration_h, duration_h * 60)
+        # Areas under curve
+        area_inside  = float(np.trapz(total_curve[inside],  t_axis))
+        area_outside = float(np.trapz(total_curve[~inside], t_axis))
+
+        # Roughness via integral of (dc/dt)^2
+        dcdt  = np.gradient(total_curve, t_axis)
+        rough = float(np.trapz(dcdt**2, t_axis))
+
+        # Peak height
+        peak = float(np.max(total_curve))
+
+        return area_inside - lam_out*area_outside - lam_rough*rough - lam_peak*peak
+
+    def greedy_optimize(start_hour, duration_h, mg_limit, fed, time_step_minutes,
+                        lambda_outside, lambda_rough, lambda_peak,
+                        target_start, target_end):
+        # Greedy addition on discrete time grid until mg_limit used
+        t_axis = np.linspace(0, duration_h, int(duration_h * 60))
         current = []
         current_total, _ = simulate_total(t_axis, current, start_hour)
         used_mg = 0
-        improved = True
         step_h = time_step_minutes / 60.0
         times = np.arange(start_hour, start_hour + duration_h + 1e-9, step_h) % 24
         times_str = [f"{int(hh)%24:02d}:{int(round((hh%1)*60))%60:02d}" for hh in times]
 
+        def score(curve):
+            return objective(curve, t_axis, target_start, target_end,
+                             lambda_outside, lambda_rough, lambda_peak, start_hour)
+
+        improved = True
         while improved:
             improved = False
             best_gain = 0.0
             best_add = None
             best_total = None
+            base_score = score(current_total)
             for tstr in times_str:
                 for dose in (10, 20):
                     if used_mg + dose > mg_limit:
                         continue
                     trial = current + [{"time_str": tstr, "mg": dose, "fed": fed}]
                     trial_total, _ = simulate_total(t_axis, trial, start_hour)
-                    gain = objective(trial_total, t_axis) - objective(current_total, t_axis)
+                    gain = score(trial_total) - base_score
                     if gain > best_gain + 1e-9:
                         best_gain = gain
                         best_add = {"time_str": tstr, "mg": dose, "fed": fed}
@@ -216,17 +302,106 @@ def optimizer_ui():
                 break
         return current, current_total, t_axis
 
-    if st.button("Optimize"):
-        opt_doses, opt_curve, t_axis = greedy_optimize(start_hour, duration_h, int(daily_mg_limit), opt_fed, int(time_step_min))
-        if not opt_doses:
-            st.warning("No feasible schedule found under the given mg limit and window. Try increasing the limit or widening the window.")
-        else:
-            total_mg = sum(d['mg'] for d in opt_doses)
-            schedule_str = ", ".join([f"{int(d['mg'])}mg @{d['time_str']}" for d in opt_doses])
-            st.success("Optimized schedule (" + str(int(total_mg)) + " mg): " + schedule_str)
-            if st.button("Load into manual doses"):
+    def refine_split_twenty(doses, t_axis, start_hour, time_step_minutes,
+                            lambda_outside, lambda_rough, lambda_peak,
+                            target_start, target_end):
+        # Try turning any 20mg dose into two 10mg at possibly different times
+        if not doses:
+            return doses, simulate_total(t_axis, doses, start_hour)[0]
+        step_h = time_step_minutes / 60.0
+        times = np.arange(start_hour, start_hour + (t_axis[-1]-t_axis[0]) + 1e-9, step_h) % 24
+        times_str = [f"{int(h)%24:02d}:{int(round((h%1)*60))%60:02d}" for h in times]
+
+        def score(curve):
+            return objective(curve, t_axis, target_start, target_end,
+                             lambda_outside, lambda_rough, lambda_peak, start_hour)
+
+        best = doses[:]
+        best_curve, _ = simulate_total(t_axis, best, start_hour)
+        best_score = score(best_curve)
+
+        improved = True
+        while improved:
+            improved = False
+            for i, d in enumerate(list(best)):
+                if d["mg"] != 20:
+                    continue
+                base = best[:i] + best[i+1:]
+                for t1 in times_str:
+                    for t2 in times_str:
+                        trial = base + [
+                            {"time_str": t1, "mg": 10, "fed": d["fed"]},
+                            {"time_str": t2, "mg": 10, "fed": d["fed"]},
+                        ]
+                        trial_curve, _ = simulate_total(t_axis, trial, start_hour)
+                        s = score(trial_curve)
+                        if s > best_score + 1e-9:
+                            best, best_curve, best_score = trial, trial_curve, s
+                            improved = True
+                            break
+                    if improved:
+                        break
+        return best, best_curve
+
+    col_btn1, col_btn2 = st.columns([1,1])
+    with col_btn1:
+        if st.button("Optimize"):
+            opt_doses, opt_curve, t_axis = greedy_optimize(
+                start_hour, duration_h, int(daily_mg_limit), opt_fed, int(time_step_min),
+                lambda_outside, lambda_rough, lambda_peak,
+                target_start, target_end
+            )
+            # local refinement (20 -> 10+10)
+            opt_doses, opt_curve = refine_split_twenty(
+                opt_doses, t_axis, start_hour, int(time_step_min),
+                lambda_outside, lambda_rough, lambda_peak,
+                target_start, target_end
+            )
+            if not opt_doses:
+                st.warning("No feasible schedule found under the given mg limit and window. Try increasing the limit or widening the window.")
+            else:
+                total_mg = sum(d['mg'] for d in opt_doses)
+                schedule_str = ", ".join([f"{int(d['mg'])}mg @{d['time_str']}" for d in opt_doses])
+                st.success("Optimized schedule (" + str(int(total_mg)) + " mg): " + schedule_str)
                 st.session_state.opt_doses = opt_doses
+                try:
+                    st.rerun()
+                except AttributeError:
+                    st.experimental_rerun()
+    with col_btn2:
+        if st.button("Clear optimized doses"):
+            st.session_state.opt_doses = []
+            try:
+                st.rerun()
+            except AttributeError:
                 st.experimental_rerun()
+
+    # Presets section (save/load)
+    with st.expander("Presets"):
+        c1, c2 = st.columns([2,1])
+        with c1:
+            preset_name = st.text_input("Preset name", value="my_opt_preset")
+        with c2:
+            if st.button("💾 Save preset (JSON)", key="opt_save"):
+                preset = build_preset_for_mode("Optimizer")
+                st.session_state.presets[preset_name] = preset
+                st.success(f"Saved preset '{preset_name}' in session below.")
+                st.download_button(
+                    label="Download preset JSON",
+                    data=json.dumps(preset, indent=2).encode("utf-8"),
+                    file_name=f"{preset_name}.json",
+                    mime="application/json",
+                    key="opt_dl_json"
+                )
+        st.write("**Session presets:**", list(st.session_state.presets.keys()))
+        uploaded = st.file_uploader("Load preset JSON", type=["json"], key="opt_upload")
+        if uploaded is not None:
+            try:
+                preset = json.load(uploaded)
+                apply_preset(preset)
+                st.success("Preset loaded. Scroll if the plot doesn't refresh automatically.")
+            except Exception as e:
+                st.error(f"Failed to load preset: {e}")
 
     # Plot current (manual or loaded) schedule
     total_all, components = simulate_total(t, st.session_state.opt_doses, start_hour)
@@ -236,7 +411,7 @@ def optimizer_ui():
         for label, y in components:
             plt.plot(start_hour + t, y, linestyle="--", label=label)
 
-    # Visualize target window
+    # Visualize target window (reuse latest inputs)
     if target_end >= target_start:
         plt.axvspan(target_start, target_end, alpha=0.12, label="Target window")
     else:
@@ -249,6 +424,26 @@ def optimizer_ui():
     plt.grid(True, linestyle="--", alpha=0.5)
     plt.legend()
     st.pyplot(fig)
+
+    # Diagnostics
+    if st.checkbox("Show objective diagnostics", value=False):
+        hours = start_hour + t
+        # window mask
+        if target_end >= target_start:
+            inside = (hours >= target_start) & (hours <= target_end)
+        else:
+            inside = (hours >= target_start) | (hours <= target_end)
+        area_inside  = float(np.trapz(total_all[inside],  t))
+        area_outside = float(np.trapz(total_all[~inside], t))
+        dcdt = np.gradient(total_all, t)
+        rough = float(np.trapz(dcdt**2, t))
+        peak  = float(np.max(total_all))
+        st.write({
+            "area_inside": area_inside,
+            "area_outside": area_outside,
+            "rough": rough,
+            "peak": peak
+        })
 
 # ====== Router ======
 if mode == "Simulator":
