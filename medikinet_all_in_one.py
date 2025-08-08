@@ -30,8 +30,8 @@ def dose_profile(hours_from_start, dose_mg, t0_hours, fed):
 
 def parse_time_to_hours(t_str, start_hour):
     hh, mm = map(int, t_str.split(":"))
+    # Relative hours from plot start; allow negative values (earlier than start)
     rel = (hh + mm/60) - start_hour
-    if rel < 0: rel += 24
     return rel
 
 def simulate_total(t_axis, doses, start_hour):
@@ -71,7 +71,20 @@ def simulator_ui():
         with c4: fed = st.selectbox("With food?", ["Fasted","Fed"], index=0, key="sim_fed")
         if st.button("➕ Add dose", key="sim_add"):
             st.session_state.sim_doses.append({"time_str": f"{int(h):02d}:{int(m):02d}", "mg": int(mg), "fed": fed=="Fed"})
+    # Show and manage current doses
     if st.session_state.sim_doses:
+        st.write("Current doses:")
+        for i, d in enumerate(list(st.session_state.sim_doses)):
+            c1, c2, c3, c4 = st.columns([2,2,2,1])
+            c1.write(f"Time: **{d['time_str']}**")
+            c2.write(f"Dose: **{d['mg']} mg**")
+            c3.write("With food: **" + ("Yes" if d['fed'] else "No") + "**")
+            if c4.button("🗑 Remove", key=f"sim_rm_{i}"):
+                st.session_state.sim_doses.pop(i)
+                try:
+                    st.rerun()
+                except Exception:
+                    st.experimental_rerun()
         total, parts = simulate_total(t, st.session_state.sim_doses, start_hour)
     else:
         total, parts = np.zeros_like(t), []
