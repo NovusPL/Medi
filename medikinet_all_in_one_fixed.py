@@ -8,8 +8,8 @@ import streamlit as st
 MAX_DOSES = 3
 
 # ===== App config =====
-st.set_page_config(page_title="Medikinet CR – All‑in‑One (fixed)", layout="wide")
-st.title("Medikinet CR – All‑in‑One (fixed)")
+st.set_page_config(page_title="Medikinet CR – All‑in‑One", layout="wide")
+st.title("Medikinet CR – All‑in‑One")
 st.caption("Simplified IR+ER Gaussian toy model. For educational tinkering only — not medical advice.")
 
 # ===== Core model =====
@@ -117,7 +117,7 @@ def simulator_ui():
         c1,c2,c3,c4 = st.columns(4)
         with c1: h = st.number_input("Hour", 0, 23, 8, key="sim_h")
         with c2: m = st.number_input("Min", 0, 59, 0, step=5, key="sim_m")
-        with c3: mg = st.selectbox("Dose", [10,20], index=1, key="sim_mg")
+        with c3: mg = st.selectbox("Dose", [10,20,30], index=1, key="sim_mg")
         with c4: fed = st.selectbox("With food?", ["Fasted","Fed"], index=0, key="sim_fed")
         if st.button("➕ Add dose", key="sim_add"):
             st.session_state.sim_doses.append({"time_str": f"{int(h):02d}:{int(m):02d}", "mg": int(mg), "fed": fed=="Fed"})
